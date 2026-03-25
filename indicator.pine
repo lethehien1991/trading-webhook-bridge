@@ -1,0 +1,272 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// Smart Money Signal | MS + ICT Structure
+// Pairs: XAUUSD · EURUSD · USDJPY
+// Timeframe: M15 (HTF: H4)
+// ══════════════════════════════════════════════════════════════════════════════
+//@version=5
+indicator("Smart Money Signal | MS + ICT", overlay=true, max_bars_back=500)
+
+// ─── INPUTS ───────────────────────────────────────────────────────────────────
+grp1 = "── Market Structure (H4) ──"
+i_htf       = input.timeframe("240", "HTF Timeframe",       group=grp1)
+i_htfSwing  = input.int(3,           "HTF Pivot Length",    group=grp1, minval=2, maxval=10)
+
+grp2 = "── M15 Setup ──"
+i_swing     = input.int(5,           "M15 Pivot Length",    group=grp2, minval=2, maxval=20)
+i_zonePct   = input.float(0.3,       "Zone Tolerance %",    group=grp2, minval=0.05, maxval=2.0, step=0.05)
+i_rr        = input.float(2.0,       "Risk:Reward Ratio",   group=grp2, minval=1.0, maxval=5.0, step=0.5)
+
+grp3 = "── Session Filter ──"
+i_london    = input.bool(true,       "London Kill Zone (07:00–10:00 UTC)", group=grp3)
+i_ny        = input.bool(true,       "NY Kill Zone (13:00–16:00 UTC)",     group=grp3)
+
+grp4 = "── Webhook ──"
+i_secret    = input.string("myTradingSecret123XYZ", "Secret Key", group=grp4)
+
+grp5 = "── Display ──"
+i_showLabel = input.bool(true,       "Show Setup Labels",   group=grp5)
+i_showZones = input.bool(true,       "Show Zone Lines",     group=grp5)
+i_showTable = input.bool(true,       "Show Info Table",     group=grp5)
+
+// ─── SESSION FILTER ───────────────────────────────────────────────────────────
+in_london = i_london and not na(time(timeframe.period, "0700-1000", "UTC"))
+in_ny     = i_ny     and not na(time(timeframe.period, "1300-1600", "UTC"))
+sessionOk = in_london or in_ny
+
+bgcolor(in_london ? color.new(color.blue,  93) : na, title="London Session")
+bgcolor(in_ny     ? color.new(color.green, 93) : na, title="NY Session")
+
+// ─── H4 MARKET STRUCTURE ──────────────────────────────────────────────────────
+// Pivot highs/lows calculated inside security context → no lookahead bias
+htf_ph = request.security(syminfo.tickerid, i_htf,
+         ta.pivothigh(high, i_htfSwing, i_htfSwing),
+         barmerge.gaps_off, barmerge.lookahead_off)
+
+htf_pl = request.security(syminfo.tickerid, i_htf,
+         ta.pivotlow(low, i_htfSwing, i_htfSwing),
+         barmerge.gaps_off, barmerge.lookahead_off)
+
+// Track last 2 confirmed swing highs & lows
+var float htf_sh1 = na, var float htf_sh2 = na
+var float htf_sl1 = na, var float htf_sl2 = na
+
+if not na(htf_ph)
+    htf_sh2 := htf_sh1
+    htf_sh1 := htf_ph
+
+if not na(htf_pl)
+    htf_sl2 := htf_sl1
+    htf_sl1 := htf_pl
+
+// HH+HL = Uptrend | LH+LL = Downtrend
+htf_bull = not na(htf_sh1) and not na(htf_sh2) and not na(htf_sl1) and not na(htf_sl2)
+         and htf_sh1 > htf_sh2   // Higher High
+         and htf_sl1 > htf_sl2   // Higher Low
+
+htf_bear = not na(htf_sh1) and not na(htf_sh2) and not na(htf_sl1) and not na(htf_sl2)
+         and htf_sh1 < htf_sh2   // Lower High
+         and htf_sl1 < htf_sl2   // Lower Low
+
+htf_label = htf_bull ? "▲ UPTREND" : htf_bear ? "▼ DOWNTREND" : "◆ MIXED"
+
+// ─── M15 SWING LEVELS → DEMAND / SUPPLY ZONES ────────────────────────────────
+m15_pl = ta.pivotlow(low,  i_swing, i_swing)
+m15_ph = ta.pivothigh(high, i_swing, i_swing)
+
+var float[] demandZones = array.new_float(0)  // swing lows  → demand
+var float[] supplyZones = array.new_float(0)  // swing highs → supply
+
+if not na(m15_pl)
+    array.unshift(demandZones, m15_pl)
+    if array.size(demandZones) > 10
+        array.pop(demandZones)
+
+if not na(m15_ph)
+    array.unshift(supplyZones, m15_ph)
+    if array.size(supplyZones) > 10
+        array.pop(supplyZones)
+
+// Zone confluence: price within i_zonePct% of a stored level
+f_nearZone(price, zones) =>
+    found     = false
+    foundLvl  = float(na)
+    sz = array.size(zones)
+    if sz > 0
+        for i = 0 to sz - 1
+            z = array.get(zones, i)
+            if math.abs(price - z) / z * 100 <= i_zonePct
+                found    := true
+                foundLvl := z
+                break
+    [found, foundLvl]
+
+[nearDemand, demandLvl] = f_nearZone(close, demandZones)
+[nearSupply, supplyLvl] = f_nearZone(close, supplyZones)
+
+// Draw zone lines
+if i_showZones and not na(m15_pl)
+    line.new(bar_index - i_swing, m15_pl, bar_index + i_swing, m15_pl,
+             color=color.new(color.green, 60), style=line.style_dashed, width=1)
+
+if i_showZones and not na(m15_ph)
+    line.new(bar_index - i_swing, m15_ph, bar_index + i_swing, m15_ph,
+             color=color.new(color.red, 60), style=line.style_dashed, width=1)
+
+// ─── REJECTION CANDLE PATTERNS ────────────────────────────────────────────────
+body      = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+rng       = high - low
+bodyOk    = body > 0 and rng > 0
+
+// BULLISH
+isHammer      = bodyOk and lowerWick >= 2.0 * body and upperWick <= 0.3 * rng
+isBullPin     = bodyOk and lowerWick >= 3.0 * body
+isBullEngulf  = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+bullRej       = isHammer or isBullPin or isBullEngulf
+
+// BEARISH
+isStar        = bodyOk and upperWick >= 2.0 * body and lowerWick <= 0.3 * rng
+isBearPin     = bodyOk and upperWick >= 3.0 * body
+isBearEngulf  = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+bearRej       = isStar or isBearPin or isBearEngulf
+
+patternName   = isHammer     ? "Hammer"
+              : isBullPin    ? "Bullish Pin Bar"
+              : isBullEngulf ? "Bullish Engulfing"
+              : isStar       ? "Shooting Star"
+              : isBearPin    ? "Bearish Pin Bar"
+              : isBearEngulf ? "Bearish Engulfing"
+              : "None"
+
+// ─── N+1 CANDLE CONFIRM — STATE MACHINE ──────────────────────────────────────
+// Bar N : conditions met → ARM (save entry, SL, TP)
+// Bar N+1: close confirms direction → FIRE alert
+
+var int    pDir     = 0    // 0=none  1=long  -1=short
+var float  pEntry   = na
+var float  pSL      = na
+var float  pTP      = na
+var string pPattern = ""
+var float  pZoneLvl = na
+
+// ARM on bar N (all conditions except n+1 close)
+longSetup  = htf_bull and nearDemand and bullRej and sessionOk
+shortSetup = htf_bear and nearSupply and bearRej and sessionOk
+
+if barstate.isconfirmed and longSetup and pDir == 0
+    pDir     := 1
+    pEntry   := close
+    pSL      := low  - syminfo.mintick   // 1 tick below rejection low
+    pTP      := pEntry + (pEntry - pSL) * i_rr
+    pPattern := patternName
+    pZoneLvl := demandLvl
+
+if barstate.isconfirmed and shortSetup and pDir == 0
+    pDir     := -1
+    pEntry   := close
+    pSL      := high + syminfo.mintick   // 1 tick above rejection high
+    pTP      := pEntry - (pSL - pEntry) * i_rr
+    pPattern := patternName
+    pZoneLvl := supplyLvl
+
+// INVALIDATE: price broke SL before n+1 confirm
+if pDir == 1  and low  < pSL
+    pDir := 0
+if pDir == -1 and high > pSL
+    pDir := 0
+
+// CONFIRM on bar N+1
+longConfirmed  = barstate.isconfirmed and pDir == 1  and close > pEntry
+shortConfirmed = barstate.isconfirmed and pDir == -1 and close < pEntry
+
+// ─── SIGNAL LABELS ────────────────────────────────────────────────────────────
+if i_showLabel and longSetup and pDir == 0
+    label.new(bar_index, low, "▲ LONG\n" + patternName,
+              yloc=yloc.belowbar, color=color.new(color.green, 10),
+              textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if i_showLabel and shortSetup and pDir == 0
+    label.new(bar_index, high, "▼ SHORT\n" + patternName,
+              yloc=yloc.abovebar, color=color.new(color.red, 10),
+              textcolor=color.white, style=label.style_label_down, size=size.small)
+
+plotshape(longConfirmed,  "LONG CONFIRMED",  shape.triangleup,   location.belowbar, color.green, size=size.normal)
+plotshape(shortConfirmed, "SHORT CONFIRMED", shape.triangledown, location.abovebar, color.red,   size=size.normal)
+
+// ─── INFO TABLE ───────────────────────────────────────────────────────────────
+if i_showTable
+    var table t = table.new(position.top_right, 2, 5,
+                  bgcolor=color.new(color.black, 75),
+                  border_color=color.new(color.gray, 50), border_width=1,
+                  frame_color=color.new(color.gray, 50), frame_width=1)
+
+    table.cell(t, 0, 0, "H4 Structure", text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 0, htf_label,
+               text_color = htf_bull ? color.green : htf_bear ? color.red : color.yellow,
+               text_size=size.small)
+
+    table.cell(t, 0, 1, "Session",      text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 1, in_london ? "London" : in_ny ? "New York" : "Asian (off)",
+               text_color = sessionOk ? color.green : color.red, text_size=size.small)
+
+    table.cell(t, 0, 2, "Near Demand",  text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 2, nearDemand ? "YES" : "NO",
+               text_color = nearDemand ? color.green : color.red, text_size=size.small)
+
+    table.cell(t, 0, 3, "Near Supply",  text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 3, nearSupply ? "YES" : "NO",
+               text_color = nearSupply ? color.red : color.gray, text_size=size.small)
+
+    table.cell(t, 0, 4, "Pending",      text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 4, pDir == 1 ? "LONG" : pDir == -1 ? "SHORT" : "—",
+               text_color = pDir == 1 ? color.green : pDir == -1 ? color.red : color.gray,
+               text_size=size.small)
+
+// ─── ALERT → WEBHOOK BRIDGE (JSON) ───────────────────────────────────────────
+// alert() fires once per bar CLOSE → 1 POST per confirmed signal
+// JSON schema matches webhook_bridge.py format_alert_message()
+
+f_buildJson(dir) =>
+    dirStr   = dir == 1 ? "LONG" : "SHORT"
+    rrActual = dir == 1
+               ? str.tostring(math.round((pTP - pEntry) / (pEntry - pSL), 1))
+               : str.tostring(math.round((pEntry - pTP) / (pSL - pEntry), 1))
+    msStr    = dir == 1 ? "H4 Uptrend (HH + HL)" : "H4 Downtrend (LH + LL)"
+    sessionStr = in_london ? "London" : "New York"
+
+    str.format(
+        '{{"secret":"{0}","pair":"{1}","time":"{2} UTC","timeframe":"{3}",' +
+        '"signal":"{4}","entry":"{5}","stop_loss":"{6}","target":"{7}",' +
+        '"rr":"{8}:1","position_size":"1.0%",' +
+        '"cond1":"{9}",' +
+        '"cond2":"Zone Confluence @ {10}",' +
+        '"cond3":"Rejection: {11}",' +
+        '"cond4":"N+1 Candle Close Confirmed",' +
+        '"cond5":"Session: {12}",' +
+        '"cond6":"SL: {13} | TP: {14}",' +
+        '"cond7":"R:R = {8}:1"}}',
+        i_secret,
+        syminfo.ticker,
+        str.format_time(timenow, "yyyy-MM-dd HH:mm"),
+        timeframe.period,
+        dirStr,
+        str.tostring(pEntry, format.mintick),
+        str.tostring(pSL,    format.mintick),
+        str.tostring(pTP,    format.mintick),
+        rrActual,
+        msStr,
+        str.tostring(pZoneLvl, format.mintick),
+        pPattern,
+        sessionStr,
+        str.tostring(pSL, format.mintick),
+        str.tostring(pTP, format.mintick)
+    )
+
+if longConfirmed
+    alert(f_buildJson(1), alert.freq_once_per_bar_close)
+    pDir := 0
+
+if shortConfirmed
+    alert(f_buildJson(-1), alert.freq_once_per_bar_close)
+    pDir := 0
